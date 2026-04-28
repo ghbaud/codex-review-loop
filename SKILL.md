@@ -48,6 +48,19 @@ Always use the Agent tool with `subagent_type: "codex:codex-rescue"`. Always inc
 - `--background` gives Claude a job ID and a deterministic polling target. The rescue subagent's auto-selection picks background for complex tasks anyway.
 - `--fresh` skips the resume-prompt that the rescue agent otherwise asks via AskUserQuestion.
 
+**Two-layer dispatch -- the rescue subagent is NOT the Codex job.** This trips people up; pay attention.
+
+There are two separate background processes:
+
+1. **The rescue subagent** is the wrapper Claude invokes via the Agent tool. Its only job is to dispatch the Codex companion and exit. It usually finishes in 30-90 seconds.
+2. **The Codex job** is the actual review work. It runs inside the codex-companion process and is identified by an ID like `task-XXXXX-XXXXX`. It typically takes 3-10 minutes for a real review.
+
+When you call the Agent tool with `run_in_background: true`, you get a "completed" notification when the **rescue subagent** finishes -- which means dispatch is done, NOT that the review is done. The rescue subagent's return value contains a sentence like `Codex Task started in the background as task-XXXXX-XXXXX. Check /codex:status task-XXXXX-XXXXX for progress.` That `task-XXXXX-XXXXX` is the Codex job ID. The actual review work runs against THAT id and must be polled separately via the codex-companion (see Polling pattern below).
+
+**Recommendation: do NOT pass `run_in_background: true` to the Agent tool.** Dispatch is fast (under two minutes), and running the rescue subagent in the foreground means Claude blocks until the Codex job ID is in hand and can immediately start the Monitor poll against it. Background mode on the Agent tool just adds a confusing intermediate "completed" notification that does not mean what it sounds like.
+
+If you DO run the Agent in background (e.g., to free Claude up for other work during dispatch), be explicit in your status messages to the user that the agent's "completed" event is dispatch-only, and you still have to poll the Codex job. The skill's first real adversarial review (2026-04-27, this skill on its own implementation) caught this exact confusion in the user-facing messaging -- Claude said "round 1 is running... I will be notified when it finishes" before the rescue subagent finished, then said "the actual Codex job is still running" after. The user reasonably asked "wait, did it finish or not?" The right phrasing in the dispatch acknowledgement is something like: "Rescue subagent dispatched (will exit in ~1 minute). Codex job ID will arrive then; I'll start polling against it and let you know when the actual review work completes."
+
 The Codex sandbox cannot reliably call `bd show` mid-run. A prefetch hook (`~/.claude/hooks/codex-prefetch-bd.py`) intercepts dispatches that name a bd ID and forces Claude to inline the bead's content. To skip the prefetch when Claude has already inlined everything, include `<bead_context>SKIP</bead_context>` in the prompt.
 
 **Codex CAN read the repo directly.** It has full file-system read access to the project tree. Do NOT inline source code into the dispatch prompt -- give file paths plus line ranges (e.g., `services/wheelhouse/integrations/websocket_manager.py:256-301`) and let Codex open the file. Inline only material Codex cannot otherwise see: bd state (use `<bead_context>SKIP</bead_context>` plus inlined `bd show` output), files outside the repo (e.g., `C:/Users/dhite/Downloads/trace.txt`), conversation context (the current task, the design under review, the constraints). This keeps dispatch prompts short and lets Codex consult the actual code instead of relying on Claude's snapshot, which can drift from the source.
@@ -166,7 +179,7 @@ If you find no issues, post:
 Prefix every comment with [codex].
 ```
 
-Capture the job ID. Run the polling loop above.
+Capture the **Codex job ID** from the rescue subagent's return value -- the `task-XXXXX-XXXXX` string in the wrapper's "Codex Task started in the background as ..." message. Do NOT use the Agent tool's internal agent ID; that is a different identifier and the codex-companion does not recognise it. Run the polling loop above against the Codex job ID.
 
 ### Step 3: Verify what Codex did
 
