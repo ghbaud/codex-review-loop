@@ -1,6 +1,6 @@
 ---
 name: codex-review-loop
-description: Use when Claude wants an adversarial review, design critique, plan critique, or second-opinion debugging from Codex AND wants to engage with the findings rather than receive a one-shot report. Sets up an Epic bead, asks Codex to file each finding as a child bead, then runs a back-and-forth where Claude responds to each finding, Codex responds to Claude, and so on until both agree (or the user decides to stop). Trigger this skill whenever you are about to dispatch /codex:rescue for review, critique, design feedback, or a second-opinion pass; whenever the user asks for a "codex review loop", "iterative codex review", "back-and-forth with codex", "argue with codex", or similar; or whenever you want the durability of a written record across rounds. Skip for one-shot reviews where no rebuttal is wanted, for implementation work, or in projects without bd.
+description: Use when Claude wants an adversarial review, design critique, plan critique, or second-opinion debugging from Codex AND wants to engage with the findings rather than receive a one-shot report. Sets up an Epic bead, asks Codex to file each finding as a child bead, then runs a back-and-forth where Claude responds to each finding, Codex responds to Claude, and so on until both agree (or the user decides to stop). Trigger this skill whenever you are about to dispatch /codex:codex-rescue for review, critique, design feedback, or a second-opinion pass; whenever the user asks for a "codex review loop", "iterative codex review", "back-and-forth with codex", "argue with codex", or similar; or whenever you want the durability of a written record across rounds. Skip for one-shot reviews where no rebuttal is wanted, for implementation work, or in projects without bd.
 ---
 
 # Codex Review Loop
@@ -19,7 +19,7 @@ If anything in this protocol fails or behaves unexpectedly -- a bd command error
 
 A single Codex rescue gives you findings without a way to push back. Some findings are valuable, some are wrong, some are based on misreadings. This skill lets Claude examine each finding, push back where appropriate, and let Codex defend or concede. The result is a durable record of what was reviewed, what was decided, and why.
 
-The pattern only pays off when the value is in the dialogue. Use it for adversarial reviews and design critiques. Do not use it for "fix this bug" or "add this feature" -- those are implementation tasks for `/codex:rescue` directly.
+The pattern only pays off when the value is in the dialogue. Use it for adversarial reviews and design critiques. Do not use it for "fix this bug" or "add this feature" -- those are implementation tasks for `/codex:codex-rescue` directly.
 
 ## Design rule: symmetric bd ownership
 
@@ -364,7 +364,7 @@ User asks Claude to get an adversarial review of a draft plan at `docs/plans/202
 
 ## When to skip this skill
 
-- One-shot review with no expected pushback: use `/codex:rescue` directly.
-- Implementation tasks (write code, fix a bug, refactor): use `/codex:rescue` directly.
+- One-shot review with no expected pushback: use `/codex:codex-rescue` directly.
+- Implementation tasks (write code, fix a bug, refactor): use `/codex:codex-rescue` directly.
 - Project has no bd tracking: the skill cannot persist state.
 - The user wants a quick verbal opinion, not a written record.
