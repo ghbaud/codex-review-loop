@@ -117,6 +117,16 @@ The mtime check must read the Codex job log file only -- not the Monitor's own o
 
 A `queued` status that persists past the 15-minute hard-stop means the Codex companion's queue dispatcher is stuck (observed 2026-04-27: a job sat in `queued` state for 17 minutes with no other active jobs blocking it). If you see `status=queued elapsed=15m` in the timeout message, the cancel-and-redispatch path may not work either -- the companion's `cancel` invokes `taskkill` against a wrapper PID, and on Git Bash that fails with a path-mangling error AND leaves the queued job intact. In that case the cleanest move is to dispatch a fresh round-N job; the stuck job stays harmlessly queued and the new one runs. Surface the issue to the user before retrying so they know the spend on the stuck job is wasted.
 
+## Project-specific review criteria
+
+Some projects have standing concerns that every review should evaluate. Those concerns live in a project-level skill named `project-review-criteria`, located at `<project>/.claude/skills/project-review-criteria/SKILL.md`.
+
+Before dispatching round 1, check the available-skills list for a skill named `project-review-criteria`. If it is present, invoke it via the Skill tool. The skill body lists project-specific items to add to the dispatch prompt under "What to look for" and, where relevant, "Constraints (do not flag)". Inline those items verbatim into the round-1 prompt.
+
+If no such skill is registered, skip this step. Do not invent project criteria.
+
+The same project criteria apply to every round of the loop, but only the round-1 dispatch needs to inline them. Codex carries the criteria forward implicitly via the findings it filed in round 1.
+
 ## Protocol
 
 ### Step 1: Create the review epic
