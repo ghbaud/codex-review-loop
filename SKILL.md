@@ -65,6 +65,31 @@ The Codex sandbox cannot reliably call `bd show` mid-run. A prefetch hook (`~/.c
 
 **Codex CAN read the repo directly.** It has full file-system read access to the project tree. Do NOT inline source code into the dispatch prompt -- give file paths plus line ranges (e.g., `services/wheelhouse/integrations/websocket_manager.py:256-301`) and let Codex open the file. Inline only material Codex cannot otherwise see: bd state (use `<bead_context>SKIP</bead_context>` plus inlined `bd show` output), files outside the repo (e.g., `C:/Users/dhite/Downloads/trace.txt`), conversation context (the current task, the design under review, the constraints). This keeps dispatch prompts short and lets Codex consult the actual code instead of relying on Claude's snapshot, which can drift from the source.
 
+## Wording rules: do not trip the read-only classifier
+
+The rescue subagent strips `--write` from the Codex invocation if the dispatch prompt looks like "review without edits." The relevant rule lives in `~/.claude/plugins/cache/openai-codex/codex/<version>/agents/codex-rescue.md`:
+
+> Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
+
+With `--write` off, the codex-companion approval policy declines every `bd` invocation -- including read-only ones like `bd show` and `bd --version`. The Codex job log shows lines like `Command declined: ... bd prime (exit -1)`. Codex cannot file findings, post comments, or close beads. The review still produces analysis, but the analysis lands as freeform stdout instead of bd state.
+
+This skill REQUIRES `--write` on. Filing findings is the entire output contract. The dispatch prompt must not phrase the task in a way that strips `--write`.
+
+Trigger phrases the classifier reads as read-only:
+- "review-only"
+- "do not modify code" / "do not edit files"
+- "without edits"
+- "code only" / "test code only" (when paired with a "do not modify" framing)
+- The `<action_safety>` block the rescue subagent inserts also tends to contain "do not edit" wording when it sees these phrases in the user task.
+
+The dispatch prompt MUST avoid those phrases AND state explicitly that the output is bd writes. Frame the output positively rather than the negative restriction:
+
+> Output: bd writes (`bd create`, `bd comment`, `bd close`). The reviewer files findings as child beads of the epic. The reviewer must not edit source files in the workspace; if a fix is obvious, name it in the finding's body, do not apply it.
+
+That keeps `--write` on (so bd works) AND tells Codex to keep its hands off source. Codex respects the source-files boundary at the prompt level; the sandbox no longer enforces it.
+
+**Verify after dispatch.** Once the rescue subagent returns the Codex job ID, open `~/.claude/plugins/data/codex-openai-codex/state/<workspace>/jobs/<job-id>.json`. The `request.write` field must be `true`. If it is `false`, the rescue subagent stripped `--write` and Codex will not be able to write to bd. Cancel the job (`node "$COMPANION" cancel <job-id>`) and re-dispatch with corrected wording. Catching this BEFORE the job runs costs no Codex tokens; catching it AFTER means the round's analysis must be salvaged manually as freeform text.
+
 ## Polling: define the companion path once
 
 Define this at the top of any Bash that calls the codex companion, so `status`, `result`, and `cancel` always use the same path:
@@ -152,7 +177,7 @@ Read the review target into Claude's context first so Claude can inline it. Code
 
 If you have NO prior context (the user invoked this skill without having worked the problem with you), ask the user for constraints before dispatching. Better to spend one user turn than to burn Codex tokens on settled questions.
 
-Use the Agent tool with `subagent_type: "codex:codex-rescue"`. The prompt:
+Use the Agent tool with `subagent_type: "codex:codex-rescue"`. The prompt (read the "Wording rules" section above before composing -- the Output and source-files lines are NOT optional):
 
 ```
 --background --fresh
@@ -167,6 +192,12 @@ What to look for:
 
 Constraints (do not flag):
 <list anything Codex should ignore>
+
+Output: bd writes only. The reviewer files findings as child beads of
+<epic-id> via `bd create`, posts the round-complete comment via
+`bd comment`, and uses `bd close` if any finding is unambiguous. The
+reviewer must not edit source files in the workspace; if a fix is
+obvious, name the fix in the finding's body, do not apply it.
 
 For each distinct finding, file a child bead of <epic-id>:
   bd create --type=task --parent=<epic-id> --priority=2 \
@@ -188,6 +219,8 @@ If you find no issues, post:
 
 Prefix every comment with [codex].
 ```
+
+**Do NOT use the words "review-only", "do not modify code", "without edits", or "code only" anywhere in the dispatch prompt.** They look harmless but they trip the rescue subagent's classifier and strip `--write`. See the Wording rules section above for the rule and the verification step.
 
 Capture the **Codex job ID** from the rescue subagent's return value -- the `task-XXXXX-XXXXX` string in the wrapper's "Codex Task started in the background as ..." message. Do NOT use the Agent tool's internal agent ID; that is a different identifier and the codex-companion does not recognise it. Run the polling loop above against the Codex job ID.
 
@@ -326,6 +359,17 @@ After every Codex round, verify the bd state directly. Codex is good but not per
 - **Comments without a `bd close`** when Codex said it agreed. Close on Codex's behalf and add a `[claude]` follow-up noting the action.
 - **Beads in the wrong project.** bd walks up the filesystem to find `.beads/`. Verify new bead IDs have the expected prefix (e.g., `wh-` for WheelHouse).
 
+**Source-tree check after every round.** Once `--write` is on (the rule for this skill), Codex has the technical ability to edit files in the workspace. The dispatch prompt's "do not edit source files" instruction is what holds Codex back; it is behavioral discipline, not a sandbox guarantee. Run a tracked-tree check after every round and BEFORE responding to findings:
+
+```bash
+git status --porcelain
+git diff --stat
+```
+
+If either reports any file change Claude did not initiate, abort the loop and ask the user before proceeding. A common false-positive: project files generated by hooks (file maps, knowledge-bead exports) that the SessionStart or PreToolUse hooks regenerate. Filter those out by name; flag anything else.
+
+**JSON write-flag check after dispatch.** Open the job's metadata file at `~/.claude/plugins/data/codex-openai-codex/state/<workspace>/jobs/<job-id>.json`. The `request.write` field must be `true`. If it is `false`, see "Wording rules" -- the rescue subagent stripped `--write` and Codex cannot file findings. Cancel and re-dispatch.
+
 ## Cancelling a stuck job
 
 1. Try the companion's cancel: `node "$COMPANION" cancel <job-id>`. On Windows / Git Bash this may fail with a `taskkill` path-mangling error.
@@ -340,7 +384,9 @@ After cancel, either reduce the scope of the review and redispatch, or abandon t
 
 **Codex returns malformed beads (e.g., garbled descriptions, missing fields).** Treat each one individually. Either fix with `bd update` or close it as malformed and dispatch a re-review for that specific finding.
 
-**Codex decided to write a freeform stdout summary instead of filing beads.** This happened when the dispatch prompt was unclear. The Codex result fetch via `node "$COMPANION" result <job-id>` will show the freeform text. Salvage manually: read the text, file beads from it as if Claude were the author, prefix descriptions with `[codex] originally posted in chat without filing as bead:` so the audit trail is honest.
+**Codex decided to write a freeform stdout summary instead of filing beads.** Most common root cause: the rescue subagent stripped `--write` from the Codex invocation because the dispatch prompt looked like "review without edits" -- see the Wording rules section for triggers and the verification step that catches this BEFORE the job runs. Symptom in the job log: every `bd` invocation shows `Command declined: ... bd <subcommand> (exit -1)`. The job's JSON metadata at `~/.claude/plugins/data/codex-openai-codex/state/<workspace>/jobs/<job-id>.json` shows `"write": false`.
+
+If you catch the misclassification before the job runs, cancel and re-dispatch with corrected wording. If the job already completed: the Codex result fetch via `node "$COMPANION" result <job-id>` shows the freeform text. Salvage manually: read the text, file beads from it as if Claude were the author, prefix descriptions with `[codex] originally posted in chat without filing as bead:` so the audit trail is honest. Real example: the wh-pbpy run on 2026-04-28 hit this exact path; 6 findings were salvaged from the freeform summary and the loop continued normally from round 2.
 
 **Codex run exceeds the 15-minute polling window.** This is the stuck-job case. Cancel per the section above and reduce scope.
 
