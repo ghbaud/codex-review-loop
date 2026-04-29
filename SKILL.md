@@ -111,15 +111,17 @@ Then use `node "$COMPANION" status <id>`, `node "$COMPANION" result <id>`, and `
 Background dispatch returns a job ID immediately. Run the polling script below via the `Bash` tool with `run_in_background: true`. The script polls the Codex companion every 30 seconds and exits on one of three conditions:
 
 1. **Terminal status.** The Codex job reached `completed`, `failed`, `cancelled`, or `interrupted`. Normal completion.
-2. **Stale log.** The Codex job log file has not been written to for 5 minutes. This usually means Codex is stuck, but it can also mean deep reasoning. When this fires, ask the user before continuing: "Codex log has been quiet 5 minutes. Status still says running. This can mean stuck or deep reasoning. Continue waiting, or cancel?"
-3. **Hard timeout.** 15 minutes elapsed without terminal status or stale log. Ask the user how to proceed.
+2. **Stale log (running jobs only).** The Codex job log file has not been written to for 5 minutes WHILE status is `running`. This usually means Codex is stuck, but it can also mean deep reasoning. When this fires, ask the user before continuing: "Codex log has been quiet 5 minutes. Status still says running. This can mean stuck or deep reasoning. Continue waiting, or cancel?" The check is gated on `running` so a job that sits in `queued` does not trip stale-log; a stuck queued job has no log writes at all and would otherwise exit at 5 minutes instead of reaching the 15-minute timeout where the queued-stuck guidance applies.
+3. **Hard timeout.** 15 minutes elapsed without terminal status or stale log. Ask the user how to proceed -- the job may be genuinely stuck OR may still be doing useful work.
+4. **Status parse failure.** Three consecutive polls return no parseable status. Usually means the job ID is wrong, the companion path is wrong, or the companion's status output format changed. Exit early so Claude can investigate instead of waiting 15 minutes.
 
-Claude gets exactly one notification when the script exits, with the exit reason in the final stdout line. The intermediate status lines are not delivered live during the run.
+Claude is notified when the background script exits. The exit reason appears in the final stdout line; Claude reads it from the completed run output. Intermediate status lines are written to the run output but are not delivered as separate notifications.
 
 ```bash
 JOB=<job-id>
 COMPANION="${CLAUDE_PLUGIN_ROOT:-C:/Users/dhite/.claude/plugins/cache/openai-codex/codex/1.0.3}/scripts/codex-companion.mjs"
 START=$(date +%s)
+empty_count=0
 while true; do
   s=$(node "$COMPANION" status "$JOB" 2>/dev/null)
   status=$(echo "$s" | grep -oE '\| (queued|pending|running|completed|failed|cancelled|interrupted) \|' | head -1 | tr -d ' |')
@@ -131,10 +133,19 @@ while true; do
     log_age=$(( $(date +%s) - log_mtime ))
   fi
   echo "$(date +%H:%M:%S) status=$status elapsed=$elapsed log_age=${log_age}s"
+  if [ -z "$status" ]; then
+    empty_count=$((empty_count + 1))
+    if [ "$empty_count" -ge 3 ]; then
+      echo "STATUS_ERROR: companion returned no parseable status 3 times -- check job ID and companion path"; exit 0
+    fi
+    sleep 30
+    continue
+  fi
+  empty_count=0
   case "$status" in
     completed|failed|cancelled|interrupted) echo "TERMINAL: $status"; exit 0 ;;
   esac
-  if [ "$log_age" != "?" ] && [ "$log_age" -gt 300 ]; then
+  if [ "$status" = "running" ] && [ "$log_age" != "?" ] && [ "$log_age" -gt 300 ]; then
     echo "STALE_LOG: ${log_age}s -- Codex log quiet, ask user"; exit 0
   fi
   if [ $(( $(date +%s) - START )) -gt 900 ]; then
@@ -146,7 +157,7 @@ done
 
 The mtime check must read the Codex job log file only -- not any wrapper output file. Otherwise the heuristic loses meaning.
 
-**Why background `Bash` and not `Monitor`.** `Monitor` delivers each stdout line as a separate notification to Claude. With 30-second polling over a 10-minute review, that is roughly 20 notifications, and notifications past the 5-minute prompt cache time-to-live each pay a full uncached context read. Background `Bash` delivers a single notification when the script exits. The trade-off: Claude cannot see status during the run -- if the user wants to cancel mid-run for any reason other than a stale log, they have to interrupt the session.
+**Why background `Bash` and not `Monitor`.** `Monitor` delivers each stdout line as a separate notification to Claude. With 30-second polling over a 10-minute review, that is roughly 20 notifications. Each notification is a separate model turn, with its own token and time cost on top of the polling output itself. Even with prompt caching the wake-ups multiply API turns. Background `Bash` produces one completion notification when the script exits. The trade-off: Claude cannot see status during the run -- if the user wants to cancel mid-run for any reason other than a stale log, they have to interrupt the session.
 
 A `queued` status that persists past the 15-minute hard-stop means the Codex companion's queue dispatcher is stuck (observed 2026-04-27: a job sat in `queued` state for 17 minutes with no other active jobs blocking it). If you see `status=queued elapsed=15m` in the timeout message, the cancel-and-redispatch path may not work either -- the companion's `cancel` invokes `taskkill` against a wrapper PID, and on Git Bash that fails with a path-mangling error AND leaves the queued job intact. In that case the cleanest move is to dispatch a fresh round-N job; the stuck job stays harmlessly queued and the new one runs. Surface the issue to the user before retrying so they know the spend on the stuck job is wasted.
 
@@ -396,7 +407,7 @@ After cancel, either reduce the scope of the review and redispatch, or abandon t
 
 If you catch the misclassification before the job runs, cancel and re-dispatch with corrected wording. If the job already completed: the Codex result fetch via `node "$COMPANION" result <job-id>` shows the freeform text. Salvage manually: read the text, file beads from it as if Claude were the author, prefix descriptions with `[codex] originally posted in chat without filing as bead:` so the audit trail is honest. Real example: the wh-pbpy run on 2026-04-28 hit this exact path; 6 findings were salvaged from the freeform summary and the loop continued normally from round 2.
 
-**Codex run exceeds the 15-minute polling window.** This is the stuck-job case. Cancel per the section above and reduce scope.
+**Codex run exceeds the 15-minute polling window.** Status is `TIMEOUT_15MIN`. The job may be genuinely stuck OR may still be doing useful work. Ask the user before cancelling. If the user confirms the job is stuck (or it has been queued the entire time -- see the queued-stuck note in the polling section), cancel per the section above and reduce scope.
 
 **Foreground vs background mismatch.** The rescue subagent's auto-selection prefers background for complex tasks, even if the prompt did not explicitly choose. Always include `--background` explicitly in the prompt to avoid surprise.
 
