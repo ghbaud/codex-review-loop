@@ -57,7 +57,7 @@ There are two separate background processes:
 
 When you call the Agent tool with `run_in_background: true`, you get a "completed" notification when the **rescue subagent** finishes -- which means dispatch is done, NOT that the review is done. The rescue subagent's return value contains a sentence like `Codex Task started in the background as task-XXXXX-XXXXX. Check /codex:status task-XXXXX-XXXXX for progress.` That `task-XXXXX-XXXXX` is the Codex job ID. The actual review work runs against THAT id and must be polled separately via the codex-companion (see Polling pattern below).
 
-**Recommendation: do NOT pass `run_in_background: true` to the Agent tool.** Dispatch is fast (under two minutes), and running the rescue subagent in the foreground means Claude blocks until the Codex job ID is in hand and can immediately start the Monitor poll against it. Background mode on the Agent tool just adds a confusing intermediate "completed" notification that does not mean what it sounds like.
+**Recommendation: do NOT pass `run_in_background: true` to the Agent tool.** Dispatch is fast (under two minutes), and running the rescue subagent in the foreground means Claude blocks until the Codex job ID is in hand and can immediately start the background Bash poll against it. Background mode on the Agent tool just adds a confusing intermediate "completed" notification that does not mean what it sounds like.
 
 If you DO run the Agent in background (e.g., to free Claude up for other work during dispatch), be explicit in your status messages to the user that the agent's "completed" event is dispatch-only, and you still have to poll the Codex job. The skill's first real adversarial review (2026-04-27, this skill on its own implementation) caught this exact confusion in the user-facing messaging -- Claude said "round 1 is running... I will be notified when it finishes" before the rescue subagent finished, then said "the actual Codex job is still running" after. The user reasonably asked "wait, did it finish or not?" The right phrasing in the dispatch acknowledgement is something like: "Rescue subagent dispatched (will exit in ~1 minute). Codex job ID will arrive then; I'll start polling against it and let you know when the actual review work completes."
 
@@ -108,7 +108,13 @@ Then use `node "$COMPANION" status <id>`, `node "$COMPANION" result <id>`, and `
 
 ## Polling pattern
 
-Background dispatch returns a job ID immediately. Use the Monitor tool with the script below. It emits one line every 30 seconds with status/elapsed/log-age, exits on terminal status, warns when the job log is stale 5+ minutes, and hard-stops at 15 minutes so Claude asks the user. The 5-minute mtime warning is a heuristic: a quiet log can mean Codex is stuck OR deep in reasoning. The user prompt should make that clear: "Codex log has been quiet 5 minutes. Status still says running. This can mean stuck or deep reasoning. Continue waiting, or cancel?"
+Background dispatch returns a job ID immediately. Run the polling script below via the `Bash` tool with `run_in_background: true`. The script polls the Codex companion every 30 seconds and exits on one of three conditions:
+
+1. **Terminal status.** The Codex job reached `completed`, `failed`, `cancelled`, or `interrupted`. Normal completion.
+2. **Stale log.** The Codex job log file has not been written to for 5 minutes. This usually means Codex is stuck, but it can also mean deep reasoning. When this fires, ask the user before continuing: "Codex log has been quiet 5 minutes. Status still says running. This can mean stuck or deep reasoning. Continue waiting, or cancel?"
+3. **Hard timeout.** 15 minutes elapsed without terminal status or stale log. Ask the user how to proceed.
+
+Claude gets exactly one notification when the script exits, with the exit reason in the final stdout line. The intermediate status lines are not delivered live during the run.
 
 ```bash
 JOB=<job-id>
@@ -129,7 +135,7 @@ while true; do
     completed|failed|cancelled|interrupted) echo "TERMINAL: $status"; exit 0 ;;
   esac
   if [ "$log_age" != "?" ] && [ "$log_age" -gt 300 ]; then
-    echo "WARN: log mtime stale (${log_age}s)"
+    echo "STALE_LOG: ${log_age}s -- Codex log quiet, ask user"; exit 0
   fi
   if [ $(( $(date +%s) - START )) -gt 900 ]; then
     echo "TIMEOUT_15MIN: ask user"; exit 0
@@ -138,7 +144,9 @@ while true; do
 done
 ```
 
-The mtime check must read the Codex job log file only -- not the Monitor's own output file. Otherwise the heuristic loses meaning.
+The mtime check must read the Codex job log file only -- not any wrapper output file. Otherwise the heuristic loses meaning.
+
+**Why background `Bash` and not `Monitor`.** `Monitor` delivers each stdout line as a separate notification to Claude. With 30-second polling over a 10-minute review, that is roughly 20 notifications, and notifications past the 5-minute prompt cache time-to-live each pay a full uncached context read. Background `Bash` delivers a single notification when the script exits. The trade-off: Claude cannot see status during the run -- if the user wants to cancel mid-run for any reason other than a stale log, they have to interrupt the session.
 
 A `queued` status that persists past the 15-minute hard-stop means the Codex companion's queue dispatcher is stuck (observed 2026-04-27: a job sat in `queued` state for 17 minutes with no other active jobs blocking it). If you see `status=queued elapsed=15m` in the timeout message, the cancel-and-redispatch path may not work either -- the companion's `cancel` invokes `taskkill` against a wrapper PID, and on Git Bash that fails with a path-mangling error AND leaves the queued job intact. In that case the cleanest move is to dispatch a fresh round-N job; the stuck job stays harmlessly queued and the new one runs. Surface the issue to the user before retrying so they know the spend on the stuck job is wasted.
 
@@ -398,7 +406,7 @@ User asks Claude to get an adversarial review of a draft plan at `docs/plans/202
 
 1. Claude creates `wh-abc1` (Adversarial review of foo plan), an epic.
 2. Claude reads the plan file. Claude dispatches Codex with the round-1 template, inlining the plan content and naming `wh-abc1`. Background mode, fresh thread.
-3. Claude polls every 30 seconds via Monitor. After 4 minutes, status = completed.
+3. Claude starts the polling script via `Bash` with `run_in_background: true`. After 4 minutes, the script exits with `TERMINAL: completed`.
 4. Claude verifies: `bd children wh-abc1` shows three new findings `wh-abc1.1`, `wh-abc1.2`, `wh-abc1.3`. Each has the right labels and a `[codex]` description prefix.
 5. Claude processes each:
    - `wh-abc1.1` (concurrency race): Claude agrees, files follow-up bead `wh-abc2` with no parent (`discovered-during-review` label), comments `[claude] Agree. Filed wh-abc2 for the implementation.`, closes.
