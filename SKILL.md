@@ -7,6 +7,8 @@ description: Use when Claude wants an adversarial review, design critique, plan 
 
 This skill runs a structured back-and-forth between Claude and Codex on a review task. Findings live in beads. Each finding has its own thread of comments, prefixed `[claude]` or `[codex]` so the conversation is auditable. The loop continues until every finding is closed by agreement, or until the user steps in to break a deadlock.
 
+**Always use a dedicated review epic.** Even when the work being reviewed already has an implementation epic, the review loop gets its own fresh epic. See Step 1 for the reasoning.
+
 ## Status: actively maintained
 
 The protocol mechanics are stable: tested end-to-end against itself three times, then used on two real reviews on 2026-04-27 (WheelHouse Google STT retraction policy review wh-76yv with 5 findings closed across 2 rounds; wh-58vf molecule-structure review with 5 findings closed across 3 rounds). Both real runs converged.
@@ -175,12 +177,20 @@ The same project criteria apply to every round of the loop, but only the round-1
 
 ### Step 1: Create the review epic
 
+**Always create a NEW, dedicated review epic. Never reuse an existing implementation epic, even if the work being reviewed already has one.**
+
+The review epic is for review findings only -- one finding per child bead, written by Codex, responded to by Claude, and closed when both sides converge. The implementation epic (the one that tracks the code work itself) is a different concept and lives separately. Reusing the implementation epic mixes review findings into the implementation epic's children list and confuses the audit trail in both directions:
+- The implementation epic's "open children" no longer reflects implementation work left to do; it includes review findings that may already be answered by the existing implementation children.
+- The review loop's termination check (close the epic when all children are closed) cannot fire, because the implementation children are still open.
+
+If the work being reviewed has its own implementation epic, link the new review epic to it from the description ("Review of design proposed under `<impl-epic-id>` (`<impl-epic-title>`)") rather than nesting one under the other.
+
 ```
 bd create --type=epic --priority=2 --label=review-loop \
   --title="<review subject>" --description="<full context>"
 ```
 
-Description should include what is being reviewed (file paths, plan documents, code branches), what kind of review is wanted, and constraints the reviewer should not flag. Capture the epic ID.
+Description should include what is being reviewed (file paths, plan documents, code branches), what kind of review is wanted, constraints the reviewer should not flag, and a pointer to any related implementation epic. Capture the epic ID.
 
 ### Step 2: Dispatch Codex round 1
 
