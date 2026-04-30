@@ -67,6 +67,25 @@ The Codex sandbox cannot reliably call `bd show` mid-run. A prefetch hook (`~/.c
 
 **Codex CAN read the repo directly.** It has full file-system read access to the project tree. Do NOT inline source code into the dispatch prompt -- give file paths plus line ranges (e.g., `services/wheelhouse/integrations/websocket_manager.py:256-301`) and let Codex open the file. Inline only material Codex cannot otherwise see: bd state (use `<bead_context>SKIP</bead_context>` plus inlined `bd show` output), files outside the repo (e.g., `C:/Users/dhite/Downloads/trace.txt`), conversation context (the current task, the design under review, the constraints). This keeps dispatch prompts short and lets Codex consult the actual code instead of relying on Claude's snapshot, which can drift from the source.
 
+**Pre-stage large prompts to a file.** When the dispatch prompt is large (rough threshold: more than about 10 KB of inlined content -- bd state, design notes, file lists, criteria), do NOT pass the full content as the Agent tool's `prompt` argument. Instead:
+
+1. Write the full round prompt to a stable path under `C:/tmp/` (e.g., `C:/tmp/codex-round-<N>-prompt.md`).
+2. Pass a short wrapper to the Agent tool that tells Codex to read that file and act on it. The wrapper still needs the `--background --fresh` line and the `<bead_context>SKIP</bead_context>` marker.
+
+Example wrapper:
+
+```
+--background --fresh
+
+<bead_context>SKIP</bead_context>
+
+Read C:/tmp/codex-round-1-prompt.md in full and execute the round-1 review described in that file. The file contains the complete dispatch: bd state, file paths to read, what to look for, and the output contract (bd writes -- file findings as child beads of <epic-id> via `bd create`). Do not summarize -- act on it. The reviewer must not edit source files; if a fix is obvious, name it in the finding's body, do not apply it.
+```
+
+Why this matters: the rescue subagent appears to detect "very large prompt" and rewrite it as a `@<path>` reference (a real symptom observed 2026-04-29 on this skill's first use against wh-fc1x children: a 55 KB inline prompt was rewritten to `@C:/tmp/codex-design-review-prompt.md` -- a file the rescue subagent had not written). The Codex job ran, returned `status=0`, but produced no findings because Codex could not read the hallucinated file. Pre-staging removes the rewrite ambiguity: the file exists at the path the wrapper names, so whatever the rescue subagent does, Codex resolves it correctly.
+
+For small prompts (single-paragraph round-N follow-ups, or quick re-dispatches), inline is still fine.
+
 ## Wording rules: do not trip the read-only classifier
 
 The rescue subagent strips `--write` from the Codex invocation if the dispatch prompt looks like "review without edits." The relevant rule lives in `~/.claude/plugins/cache/openai-codex/codex/<version>/agents/codex-rescue.md`:
@@ -206,7 +225,7 @@ Read the review target into Claude's context first so Claude can inline it. Code
 
 If you have NO prior context (the user invoked this skill without having worked the problem with you), ask the user for constraints before dispatching. Better to spend one user turn than to burn Codex tokens on settled questions.
 
-Use the Agent tool with `subagent_type: "codex:codex-rescue"`. The prompt (read the "Wording rules" section above before composing -- the Output and source-files lines are NOT optional):
+Use the Agent tool with `subagent_type: "codex:codex-rescue"`. The prompt (read the "Wording rules" section above before composing -- the Output and source-files lines are NOT optional). **If the round-1 prompt will exceed about 10 KB once bd state is inlined, use the file-staging pattern from the "Pre-stage large prompts to a file" subsection of "Dispatch path" instead of the inline pattern below.** The inline pattern below is only safe for short prompts; the rescue subagent silently rewrites large inline prompts to broken `@<path>` references. See the "Large inline prompt silently rewritten" entry under "Other failure modes".
 
 ```
 --background --fresh
@@ -418,6 +437,17 @@ After cancel, either reduce the scope of the review and redispatch, or abandon t
 If you catch the misclassification before the job runs, cancel and re-dispatch with corrected wording. If the job already completed: the Codex result fetch via `node "$COMPANION" result <job-id>` shows the freeform text. Salvage manually: read the text, file beads from it as if Claude were the author, prefix descriptions with `[codex] originally posted in chat without filing as bead:` so the audit trail is honest. Real example: the wh-pbpy run on 2026-04-28 hit this exact path; 6 findings were salvaged from the freeform summary and the loop continued normally from round 2.
 
 **Codex run exceeds the 15-minute polling window.** Status is `TIMEOUT_15MIN`. The job may be genuinely stuck OR may still be doing useful work. Ask the user before cancelling. If the user confirms the job is stuck (or it has been queued the entire time -- see the queued-stuck note in the polling section), cancel per the section above and reduce scope.
+
+**Large inline prompt silently rewritten as `@<path>` reference with no file written.** Symptom: the Codex job completes very quickly (under a minute) with `status=0` and `phase=done`, but the result text is something like `I couldn't read C:\tmp\<some-name>.md because it does not exist` and the bd state shows zero new findings. The job's JSON metadata at `~/.claude/plugins/data/codex-openai-codex/state/<workspace>/jobs/<job-id>.json` shows `request.prompt` set to a short string of the form `@C:/tmp/<some-name>.md` -- the rescue subagent collapsed Claude's full inline prompt to a file reference that does not exist. `--write` is on, but no real review work happened.
+
+Root cause (observed 2026-04-29 on the wh-fc1x children review): when the inline prompt is large (the failing case was 55 KB), the rescue subagent rewrites it to an `@<path>` reference rather than passing the full content. It does not write the referenced file. Codex tries to read the path, fails, and exits cleanly. No tokens of real review work are spent, but a Codex job is consumed.
+
+Recovery if this already happened:
+1. Verify the symptom in the JSON metadata: `request.prompt` is short and starts with `@`, while the original Agent invocation had a long inline prompt.
+2. Pre-stage the full prompt to the path the rescue subagent named (or to any path of your choosing if the original path was hallucinated -- both work).
+3. Re-dispatch with the short wrapper described in "Pre-stage large prompts to a file" above. The wrapper points Codex at the staged file by name.
+
+Prevention: use the pre-stage pattern from the start for any dispatch with substantial inlined content. See "Pre-stage large prompts to a file" in the Dispatch path section.
 
 **Foreground vs background mismatch.** The rescue subagent's auto-selection prefers background for complex tasks, even if the prompt did not explicitly choose. Always include `--background` explicitly in the prompt to avoid surprise.
 
