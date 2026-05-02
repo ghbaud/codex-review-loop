@@ -7,7 +7,7 @@ description: Use when Claude wants an adversarial review, design critique, plan 
 
 This skill runs a structured back-and-forth between Claude and Codex on a review task. Findings live in beads. Each finding has its own thread of comments, prefixed `[claude]` or `[codex]` so the conversation is auditable. The loop continues until every finding is closed by agreement, or until the user steps in to break a deadlock.
 
-**Always use a dedicated review epic.** Even when the work being reviewed already has an implementation epic, the review loop gets its own fresh epic. See Step 1 for the reasoning.
+**Always use a dedicated wrapper review epic for the findings; never flatten findings into an implementation epic.** When the work being reviewed has its own implementation epic, parent the review epic under it -- reopening the implementation epic first if it has been closed. See Step 1 for the rule, the edge case exception, and the verified reopen behavior.
 
 ## Status: actively maintained
 
@@ -212,17 +212,30 @@ The same project criteria apply to every round of the loop, but only the round-1
 
 ### Step 1: Create the review epic
 
-**Always create a NEW, dedicated review epic. Never reuse an existing implementation epic, even if the work being reviewed already has one.**
+**Always create a NEW, dedicated review epic for the findings. Never flatten review findings into an implementation epic's children list.** The wrapper review epic exists so the loop's termination check (close the epic when all children are closed) operates on review state alone, independent of any implementation work.
 
-The review epic is for review findings only -- one finding per child bead, written by Codex, responded to by Claude, and closed when both sides converge. The implementation epic (the one that tracks the code work itself) is a different concept and lives separately. Reusing the implementation epic mixes review findings into the implementation epic's children list and confuses the audit trail in both directions:
-- The implementation epic's "open children" no longer reflects implementation work left to do; it includes review findings that may already be answered by the existing implementation children.
-- The review loop's termination check (close the epic when all children are closed) cannot fire, because the implementation children are still open.
+Where the review epic lives in the bead graph depends on whether the work being reviewed has an implementation epic of its own.
 
-If the work being reviewed has its own implementation epic, link the new review epic to it from the description ("Review of design proposed under `<impl-epic-id>` (`<impl-epic-title>`)") rather than nesting one under the other.
+**Default rule -- an implementation epic exists.** Parent the review epic under the implementation epic with `--parent=<impl-epic-id>`. If the implementation epic is closed, reopen it first with `bd update <impl-epic-id> --status=open`. The implementation epic stays open until the review epic closes, which is the right behavior: a review with open findings means the implementation is not actually settled.
 
-```
+Reopening was tested clean on a throwaway closed epic with a closed child (2026-05-02). The status flipped from CLOSED to OPEN, the "Close reason" line cleared, the epic reappeared in `bd ready` and `bd list --status=open`, the existing closed child stayed closed, the parent's completion meter recalculated correctly when a new child was added, and a second `bd close` after the reopen worked identically to a first-time close.
+
+**Edge case exception.** If the user explicitly says the implementation is retrospective and the implementation epic should not be reopened (for example, the work shipped months ago and the team has no intent to revisit it), fall back to a standalone review epic with no parent. Link the two with `bd dep add <review-epic> <impl-epic>` so the relationship is still machine-queryable. Do this only when the user names the constraint; the default is to reopen.
+
+**No implementation epic at all.** Create a standalone review epic with no parent.
+
+The reasoning behind parenting (rather than the older "siblings linked by description" rule): the original objection to nesting was about flattening findings directly into the implementation epic, which would mix review state into the implementation epic's children list and break its termination check. A separate wrapper review epic underneath does not have that problem -- the wrapper owns its own children and its own termination state. Parenting also keeps the audit trail navigable from one bead. Anyone reading `bd show <impl-epic>` later sees every review that touched it, listed under CHILDREN.
+
+```bash
+# Default: an implementation epic exists (open, or just-reopened):
+bd create --type=epic --priority=2 --parent=<impl-epic-id> --label=review-loop \
+  --title="<review subject>" --description="<full context>"
+
+# Edge case: no implementation epic, OR user opted out of reopening a closed one:
 bd create --type=epic --priority=2 --label=review-loop \
   --title="<review subject>" --description="<full context>"
+# If a closed implementation epic exists and the user opted out of reopening:
+bd dep add <review-epic-id> <impl-epic-id>
 ```
 
 Description should include what is being reviewed (file paths, plan documents, code branches), what kind of review is wanted, constraints the reviewer should not flag, and a pointer to any related implementation epic. Capture the epic ID.
