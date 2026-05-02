@@ -9,6 +9,24 @@ This skill runs a structured back-and-forth between Claude and Codex on a review
 
 **Always use a dedicated wrapper review epic for the findings; never flatten findings into an implementation epic.** When the work being reviewed has its own implementation epic, parent the review epic under it -- reopening the implementation epic first if it has been closed. See Step 1 for the rule, the edge case exception, and the verified reopen behavior.
 
+## Terminology
+
+Two words in this skill describe two different scopes. They are not interchangeable, and Claude must keep them separate in user-facing messages too.
+
+- **Loop** (also **review loop**) -- one full invocation of this skill, from creating the review epic through closing it. A single conversation may contain several loops, one per review subject.
+- **Round** -- one Codex dispatch plus Claude's responses to the findings, within a single loop. A loop usually runs 2 to 4 rounds before all findings close.
+
+When reporting progress, use "loop" for the invocation and "round" for the dispatch turn. If a sentence could be read either way, name both: "round 2 of this review loop".
+
+Good:
+- "Starting a codex review loop on the websocket plan."
+- "Round 2 dispatched -- 3 findings still open."
+- "Loop complete. 5 findings: 3 agreed, 2 rejected with reasoning."
+
+Bad:
+- "Starting round 1 of the review" when you mean the loop has just begun.
+- "The previous round found 5 issues" when you mean an earlier loop on a different subject.
+
 ## Reference files
 
 When you need details that are not in this body, load the matching reference file. Do not paraphrase from memory; the references contain exact text that has been hardened against real failures.
